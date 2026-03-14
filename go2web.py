@@ -1,7 +1,9 @@
 import sys
 import socket
 import ssl
+import zlib
 from html.parser import HTMLParser
+
 
 class TextExtractor(HTMLParser):
     def __init__(self):
@@ -13,21 +15,50 @@ class TextExtractor(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in self.skip_tags:
             self.current_skip += 1
-    
+
     def handle_endtag(self, tag):
         if tag in self.skip_tags:
             self.current_skip = max(0, self.current_skip - 1)
-    
+
     def handle_data(self, data):
         if self.current_skip == 0:
             stripped = data.strip()
             if stripped:
                 self.text_parts.append(stripped)
+
     def get_text(self):
         return '\n'.join(self.text_parts)
 
+
+class SearchResultExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.results = []
+        self.current_link = None
+        self.current_title = ""
+        self.in_result_title = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "a" and "result__a" in attrs.get("class", ""):
+            self.current_link = attrs.get("href", "")
+            self.in_result_title = True
+            self.current_title = ""
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self.in_result_title:
+            self.in_result_title = False
+            if self.current_link and self.current_title:
+                self.results.append((self.current_title.strip(), self.current_link))
+            self.current_link = None
+            self.current_title = ""
+
+    def handle_data(self, data):
+        if self.in_result_title:
+            self.current_title += data
+
+
 def parse_url(url):
-    """Returns (hosts, path, port, use_ssl)"""
     use_ssl = url.startswith("https://")
     url = url.replace("https://", "").replace("http://", "")
     if "/" in url:
@@ -39,8 +70,8 @@ def parse_url(url):
     port = 443 if use_ssl else 80
     return host, path, port, use_ssl
 
+
 def decode_chunked(data: bytes) -> bytes:
-    """Decode HTTP chunked transfer encoding."""
     result = b""
     while data:
         crlf = data.find(b"\r\n")
@@ -48,10 +79,34 @@ def decode_chunked(data: bytes) -> bytes:
             break
         chunk_size = int(data[:crlf].split(b";")[0], 16)
         if chunk_size == 0:
-            break 
-        result += data[crlf + 2 : crlf + 2 + chunk_size]
-        data = data[crlf + 2 + chunk_size + 2 :]
+            break
+        result += data[crlf + 2: crlf + 2 + chunk_size]
+        data = data[crlf + 2 + chunk_size + 2:]
     return result
+
+
+def decode_gzip(data: bytes) -> bytes:
+    return zlib.decompress(data, wbits=16 + zlib.MAX_WBITS)
+
+
+def extract_real_url(ddg_url):
+    if "uddg=" in ddg_url:
+        uddg = ddg_url.split("uddg=")[1].split("&")[0]
+        result = ""
+        i = 0
+        while i < len(uddg):
+            if uddg[i] == "%" and i + 2 < len(uddg):
+                result += chr(int(uddg[i+1:i+3], 16))
+                i += 3
+            elif uddg[i] == "+":
+                result += " "
+                i += 1
+            else:
+                result += uddg[i]
+                i += 1
+        return result
+    return ddg_url
+
 
 def fetch_url(url, max_redirects=5):
     for _ in range(max_redirects):
@@ -66,6 +121,8 @@ def fetch_url(url, max_redirects=5):
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
             f"Accept: text/html\r\n"
+            f"Accept-Encoding: gzip\r\n"
+            f"User-Agent: Mozilla/5.0\r\n"
             f"Connection: close\r\n\r\n"
         )
         sock.send(request.encode())
@@ -82,7 +139,7 @@ def fetch_url(url, max_redirects=5):
             print("Error: malformed response")
             return
         headers_raw = response[:header_end].decode(errors="ignore")
-        body = response[header_end + 4 :]
+        body = response[header_end + 4:]
 
         status_line = headers_raw.split("\r\n")[0]
         status_code = int(status_line.split()[1])
@@ -95,60 +152,108 @@ def fetch_url(url, max_redirects=5):
                     break
             continue
 
-        headers_lower = headers_raw.lower()
-        if "transfer-encoding: chunked" in headers_lower:
+        if "transfer-encoding: chunked" in headers_raw.lower():
             body = decode_chunked(body)
-        
+
+        if "content-encoding: gzip" in headers_raw.lower():
+            body = decode_gzip(body)
+
         body_text = body.decode(errors="ignore")
         parser = TextExtractor()
         parser.feed(body_text)
         print(parser.get_text())
-        return 
+        return
     print("Error: too many redirects")
 
-def show_help():
-    print("Usage: go2web.py <URL>")
-    print("go2web -u <URL>  - Fetch and display text content from the specified URL")
-    print("go2web -h        - Show this help message")
-    print("go2web -s <search-term> -Search for something (top 10 results)")
 
-def fetch_url(url):
-    if url.startswith("https://"):
-        url = url[len("https://"):]
-    host = url 
-    path = "/"
+def search(term):
+    encoded = ""
+    for ch in term:
+        if ch.isalnum() or ch in "-_.~":
+            encoded += ch
+        elif ch == " ":
+            encoded += "+"
+        else:
+            encoded += f"%{ord(ch):02X}"
+
+    url = f"https://html.duckduckgo.com/html/?q={encoded}"
+    host, path, port, use_ssl = parse_url(url)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    secure_sock = ssl.wrap_socket(sock)
-    secure_sock.connect((host, 443))
-    request = f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-    secure_sock.send(request.encode())
+    sock.settimeout(10)
+    context = ssl.create_default_context()
+    sock = context.wrap_socket(sock, server_hostname=host)
+    sock.connect((host, port))
+
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        f"Host: {host}\r\n"
+        f"Accept: text/html\r\n"
+        f"Accept-Encoding: gzip\r\n"
+        f"User-Agent: Mozilla/5.0\r\n"
+        f"Connection: close\r\n\r\n"
+    )
+    sock.send(request.encode())
+
+    response = b""
     while True:
-        data = secure_sock.recv(4096)
-        if not data:
-            break 
-        print(data.decode(errors = 'ignore'), end = "")
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        response += chunk
+    sock.close()
+
+    header_end = response.find(b"\r\n\r\n")
+    headers_raw = response[:header_end].decode(errors="ignore")
+    body = response[header_end + 4:]
+
+    if "transfer-encoding: chunked" in headers_raw.lower():
+        body = decode_chunked(body)
+
+    if "content-encoding: gzip" in headers_raw.lower():
+        body = decode_gzip(body)
+
+    body_text = body.decode(errors="ignore")
+    extractor = SearchResultExtractor()
+    extractor.feed(body_text)
+
+    results = extractor.results[:10]
+    if not results:
+        print("No results found.")
+        return
+
+    for i, (title, link) in enumerate(results, 1):
+        real_url = extract_real_url(link)
+        print(f"{i}. {title}")
+        print(f"   {real_url}\n")
+
+
+def show_help():
+    print("Usage:")
+    print("  go2web -u <URL>          # Fetch and display content from URL")
+    print("  go2web -s <search-term>  # Search and print top 10 results")
+    print("  go2web -h                # Show this help message")
+
 
 if len(sys.argv) < 2:
     show_help()
     sys.exit(1)
 
 flag = sys.argv[1]
+
 if flag == "-h":
     show_help()
 elif flag == "-u":
     if len(sys.argv) < 3:
         print("Error: URL is required")
     else:
-        url = sys.argv[2]
-        print(f"Fetching {url}...\n")
-        fetch_url(url)
+        fetch_url(sys.argv[2])
 elif flag == "-s":
     if len(sys.argv) < 3:
         print("Error: search term is required")
     else:
-        term = sys.argv[2]
-        print(f"Searching for '{term}'...\n")
+        term = " ".join(sys.argv[2:])
+        search(term)
 else:
     print(f"Unknown flag: {flag}")
     show_help()
