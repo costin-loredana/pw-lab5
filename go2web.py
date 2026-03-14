@@ -3,7 +3,11 @@ import socket
 import ssl
 import zlib
 from html.parser import HTMLParser
+import json
+import os
 
+
+CACHE_FILE = "cache.json"
 
 class TextExtractor(HTMLParser):
     def __init__(self):
@@ -108,7 +112,27 @@ def extract_real_url(ddg_url):
     return ddg_url
 
 
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        with open(CACHE_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_cache(cache):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f)
+
+
 def fetch_url(url, max_redirects=5):
+    cache = load_cache()
+    if url in cache:
+        print("[cache hit]")
+        parser = TextExtractor()
+        parser.feed(cache[url])
+        print(parser.get_text())
+        return
+
     for _ in range(max_redirects):
         host, path, port, use_ssl = parse_url(url)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -159,10 +183,13 @@ def fetch_url(url, max_redirects=5):
             body = decode_gzip(body)
 
         body_text = body.decode(errors="ignore")
+        cache[url] = body_text
+        save_cache(cache)
         parser = TextExtractor()
         parser.feed(body_text)
         print(parser.get_text())
         return
+
     print("Error: too many redirects")
 
 
