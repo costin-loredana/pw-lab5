@@ -8,23 +8,7 @@ A minimal command-line HTTP client built entirely on raw TCP/TLS sockets — no 
 
 ## Demo
 
-
-```
-[text](<cli_work.mkv>)
-```
-
-**What to record:**
-1. `./go2web -h` — show the help screen
-2. `./go2web -u https://example.com` — fetch a plain HTML page
-3. `./go2web -u https://jsonplaceholder.typicode.com/posts/1` — show JSON output
-4. `./go2web -u http://github.com` — show redirect following
-5. `./go2web -u https://example.com` a second time — show `[cache hit]`
-6. `./go2web -s python sockets` — show search results
-
-**Recommended tools:**
-- **macOS/Linux:** [Terminalizer](https://github.com/faressoft/terminalizer), [asciinema](https://asciinema.org/) + [agg](https://github.com/asciinema/agg) (converts to GIF), or [Peek](https://github.com/phw/peek)
-- **Windows:** [ScreenToGif](https://www.screentogif.com/)
-- Keep it under 60 seconds. Terminal font size ≥ 14px so it's readable on GitHub.
+![how cli is used](cli_work.gif)
 
 ---
 
