@@ -9,6 +9,7 @@ import os
 
 CACHE_FILE = "cache.json"
 
+
 class TextExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -124,13 +125,19 @@ def save_cache(cache):
         json.dump(cache, f)
 
 
+def print_json(body_text):
+    try:
+        data = json.loads(body_text)
+        print(json.dumps(data, indent=2))
+    except json.JSONDecodeError:
+        print(body_text)
+
+
 def fetch_url(url, max_redirects=5):
     cache = load_cache()
     if url in cache:
         print("[cache hit]")
-        parser = TextExtractor()
-        parser.feed(cache[url])
-        print(parser.get_text())
+        print(cache[url])
         return
 
     for _ in range(max_redirects):
@@ -144,7 +151,7 @@ def fetch_url(url, max_redirects=5):
         request = (
             f"GET {path} HTTP/1.1\r\n"
             f"Host: {host}\r\n"
-            f"Accept: text/html\r\n"
+            f"Accept: text/html, application/json\r\n"
             f"Accept-Encoding: gzip\r\n"
             f"User-Agent: Mozilla/5.0\r\n"
             f"Connection: close\r\n\r\n"
@@ -183,11 +190,23 @@ def fetch_url(url, max_redirects=5):
             body = decode_gzip(body)
 
         body_text = body.decode(errors="ignore")
-        cache[url] = body_text
+
+        content_type = ""
+        for line in headers_raw.split("\r\n"):
+            if line.lower().startswith("content-type:"):
+                content_type = line.lower()
+                break
+
+        if "application/json" in content_type:
+            output = json.dumps(json.loads(body_text), indent=2)    
+        else:
+            parser = TextExtractor()
+            parser.feed(body_text)
+            output = parser.get_text()
+        
+        cache[url] = output
         save_cache(cache)
-        parser = TextExtractor()
-        parser.feed(body_text)
-        print(parser.get_text())
+        print(output)
         return
 
     print("Error: too many redirects")
