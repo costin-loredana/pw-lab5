@@ -26,8 +26,9 @@ class TextExtractor(HTMLParser):
                     'li', 'tr', 'br', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
                     'blockquote', 'pre', 'code', 'td', 'th'}
     HEADING_TAGS = {'h1', 'h2', 'h3', 'h4', 'h5', 'h6'}
-    SKIP_TAGS    = {'script', 'style', 'head', 'noscript', 'nav', 'aside',
-                    'form', 'button', 'svg', 'iframe', 'meta', 'link'}
+    # Updated SKIP_TAGS in TextExtractor
+    SKIP_TAGS = {'script', 'style', 'head', 'noscript', 'nav', 'aside',
+                'form', 'button', 'svg', 'iframe'}
 
     def __init__(self):
         super().__init__()
@@ -141,8 +142,10 @@ def _load_cache():
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             content = f.read().strip()
             data = json.loads(content) if content else {}
+            print(f"[cache] Loaded {len(data)} entries from cache", file=sys.stderr)
             return {k: v for k, v in data.items() if isinstance(v, dict)}
     except Exception:
+        print(f"[cache] Warning: could not load cache", file=sys.stderr)
         return {}
 
 
