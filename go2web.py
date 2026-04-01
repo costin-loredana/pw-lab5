@@ -1,3 +1,12 @@
+"""
+go2web — a minimal HTTP/HTTPS browser for the terminal.
+
+Usage:
+  go2web -u <URL>           Fetch and display a URL
+  go2web -s <search term>   Search DuckDuckGo (top 10 results)
+  go2web -h                 Show this help
+"""
+
 import sys
 import socket
 import ssl
@@ -22,9 +31,10 @@ class TextExtractor(HTMLParser):
 
     def __init__(self):
         super().__init__()
-        self.parts      = []
-        self.skip_depth = 0
-        self.in_pre     = False
+        self.parts        = []
+        self.skip_depth   = 0
+        self.in_pre       = False
+        self.heading_level = None
 
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
@@ -37,7 +47,7 @@ class TextExtractor(HTMLParser):
             if self.parts and self.parts[-1] != '\n':
                 self.parts.append('\n')
         if tag in self.HEADING_TAGS:
-            self.parts.append('#' * int(tag[1]) + ' ')
+            self.heading_level = int(tag[1])
 
     def handle_endtag(self, tag):
         tag = tag.lower()
@@ -46,7 +56,10 @@ class TextExtractor(HTMLParser):
             return
         if tag == 'pre':
             self.in_pre = False
-        if tag in self.BLOCK_TAGS:
+        if tag in self.HEADING_TAGS:
+            self.heading_level = None
+            self.parts.append('\n')
+        elif tag in self.BLOCK_TAGS:
             self.parts.append('\n')
 
     def handle_data(self, data):
@@ -56,7 +69,11 @@ class TextExtractor(HTMLParser):
             self.parts.append(data)
             return
         stripped = data.strip()
-        if stripped:
+        if not stripped:
+            return
+        if self.heading_level is not None:
+            self.parts.append('#' * self.heading_level + ' ' + stripped + ' ')
+        else:
             self.parts.append(stripped + ' ')
 
     def get_text(self):
@@ -77,12 +94,12 @@ class TextExtractor(HTMLParser):
 class SearchResultExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
-        self.results        = []
-        self.current_link   = None
-        self.current_title  = ""
-        self.in_title       = False
+        self.results         = []
+        self.current_link    = None
+        self.current_title   = ""
+        self.in_title        = False
         self.current_snippet = ""
-        self.in_snippet     = False
+        self.in_snippet      = False
 
     def handle_starttag(self, tag, attrs):
         attrs_dict = dict(attrs)
@@ -123,7 +140,8 @@ def _load_cache():
     try:
         with open(CACHE_FILE, "r", encoding="utf-8") as f:
             content = f.read().strip()
-            return json.loads(content) if content else {}
+            data = json.loads(content) if content else {}
+            return {k: v for k, v in data.items() if isinstance(v, dict)}
     except Exception:
         return {}
 
@@ -137,11 +155,12 @@ def _save_cache(cache):
 
 
 def _is_fresh(cached):
-    if not cached or cached.get("max_age", 0) <= 0:
+    if not cached or not isinstance(cached, dict):
+        return False
+    if cached.get("max_age", 0) <= 0:
         return False
     try:
-        age = time.time() - cached["cached_at"]
-        return age < cached["max_age"]
+        return (time.time() - cached["cached_at"]) < cached["max_age"]
     except Exception:
         return False
 
@@ -156,7 +175,6 @@ def _validation_headers(cached):
 
 
 def _parse_url(url):
-    """Return (host, path, port, use_ssl)."""
     use_ssl = url.startswith("https://")
     stripped = url.replace("https://", "").replace("http://", "")
     if "/" in stripped:
@@ -195,11 +213,6 @@ def _decode_gzip(data: bytes) -> bytes:
 
 
 def _raw_request(url, extra_headers=None, max_redirects=8, timeout=12):
-    """
-    Perform a GET request (with redirect following and SSL support).
-    Returns (status_code, headers_dict, body_text, final_url).
-    Raises RuntimeError on fatal errors.
-    """
     extra_headers = extra_headers or {}
     visited = set()
 
@@ -271,14 +284,14 @@ def _raw_request(url, extra_headers=None, max_redirects=8, timeout=12):
             if not location:
                 raise RuntimeError("Redirect with no Location header")
             if location.startswith("/"):
-                scheme    = "https" if use_ssl else "http"
-                location  = f"{scheme}://{host}{location}"
+                scheme   = "https" if use_ssl else "http"
+                location = f"{scheme}://{host}{location}"
             elif not location.startswith("http"):
-                scheme    = "https" if use_ssl else "http"
-                location  = f"{scheme}://{host}/{location}"
+                scheme   = "https" if use_ssl else "http"
+                location = f"{scheme}://{host}/{location}"
             print(f"  ↳ Redirect → {location}", file=sys.stderr)
             url           = location
-            extra_headers = {}         
+            extra_headers = {}
             continue
 
         if "chunked" in headers_dict.get("transfer-encoding", ""):
@@ -293,6 +306,12 @@ def _raw_request(url, extra_headers=None, max_redirects=8, timeout=12):
 
     raise RuntimeError("Too many redirects")
 
+
+def _extract_real_url(ddg_url):
+    if "uddg=" in ddg_url:
+        uddg = ddg_url.split("uddg=")[1].split("&")[0]
+        return unquote_plus(uddg)
+    return ddg_url
 
 
 def fetch_url(url, silent=False):
@@ -313,7 +332,6 @@ def fetch_url(url, silent=False):
         print(f"Error: {e}", file=sys.stderr)
         return ""
 
-    # 304 Not Modified — reuse cached body
     if status_code == 304 and cached:
         if not silent:
             print("[cache] 304 Not Modified — using cached copy", file=sys.stderr)
@@ -361,15 +379,7 @@ def fetch_url(url, silent=False):
     return output
 
 
-def _extract_real_url(ddg_url):
-    if "uddg=" in ddg_url:
-        uddg = ddg_url.split("uddg=")[1].split("&")[0]
-        return unquote_plus(uddg)
-    return ddg_url
-
-
 def search(term, interactive=True):
-    """Search DuckDuckGo, print top-10 results, optionally open one."""
     encoded = quote_plus(term)
     url     = f"https://html.duckduckgo.com/html/?q={encoded}"
 
@@ -388,7 +398,7 @@ def search(term, interactive=True):
         return []
 
     print()
-    print(f"  Search results for: \"{term}\"")
+    print(f'  Search results for: "{term}"')
     print("  " + "─" * 60)
     print()
     for i, r in enumerate(results, 1):
@@ -416,6 +426,7 @@ def search(term, interactive=True):
             print()
 
     return results
+
 
 def main():
     parser = argparse.ArgumentParser(add_help=False)
